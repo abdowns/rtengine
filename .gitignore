@@ -1,0 +1,69 @@
+# cmake and generated build output
+/build*/
+/cmake-build-*/
+/out/
+/install/
+/CMakeCache.txt
+/CMakeFiles/
+/CTestTestfile.cmake
+/Testing/
+/Makefile
+/build.ninja
+/.ninja_deps
+/.ninja_log
+/cmake_install.cmake
+/install_manifest.txt
+/compile_commands.json
+
+# cmake user presets
+CMakeUserPresets.json
+
+# demo captures and local benchmark reports
+*.ppm
+/benchmark*.json
+/benchmark*.png
+/demo*.ppm
+/demo*.png
+
+# coverage and profiling output
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+/coverage/
+
+# cmake package output
+/rtengine-*.tar.gz
+/rtengine-*.zip
+/rtengine-*.dmg
+
+# local editor settings
+/.idea/
+/.vscode/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# platform files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# visual studio and xcode user state
+/.vs/
+*.suo
+*.user
+*.userosscache
+*.VC.db
+*.VC.opendb
+*.xcuserstate
+xcuserdata/
+*.dSYM/
+
+# dear imgui local layout
+/imgui.ini
+
+docs/
+tests/
