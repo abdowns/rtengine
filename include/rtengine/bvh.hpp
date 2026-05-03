@@ -17,6 +17,7 @@ struct Aabb {
     void expand(const Aabb&);
     float area() const;
     bool intersect(const Ray&, float limit) const;
+    Aabb transformed(const glm::mat4&) const;
 };
 
 struct BvhNode {
@@ -33,14 +34,20 @@ struct Hit {
 class Bvh {
   public:
     void build(std::span<const Aabb> bounds);
+    void refit(std::span<const Aabb> bounds);
     const std::vector<BvhNode>& nodes() const {
         return nodes_;
     }
 
-    Hit intersect(const Mesh&, const Ray&) const;
+    const std::vector<uint32_t>& order() const {
+        return order_;
+    }
+
+    Hit intersect(const Mesh&, const Ray&, bool respectCutout = false,
+                  const Material* material = nullptr) const;
 
   private:
-    uint32_t split(uint32_t first, uint32_t count, std::span<const Aabb>);
+    uint32_t split(uint32_t first, uint32_t count, std::span<const Aabb>, unsigned depth);
     std::vector<BvhNode> nodes_;
     std::vector<uint32_t> order_;
 };

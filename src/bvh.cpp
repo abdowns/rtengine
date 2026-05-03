@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <numeric>
 #include <rtengine/bvh.hpp>
+#include <stdexcept>
 
 namespace rt {
 void Aabb::expand(glm::vec3 p) {
@@ -147,6 +148,24 @@ uint32_t Bvh::split(uint32_t first, uint32_t count, std::span<const Aabb> bounds
     return idx;
 }
 
+void Bvh::refit(std::span<const Aabb> bounds) {
+    if (bounds.size() != order_.size())
+        throw std::invalid_argument("BVH refit requires unchanged primitive membership");
+
+    for (size_t i = nodes_.size(); i-- > 0;) {
+        auto& n = nodes_[i];
+        n.bounds = {};
+
+        if (n.count)
+            for (uint32_t j = n.first; j < n.first + n.count; ++j)
+                n.bounds.expand(bounds[order_[j]]);
+        else {
+            n.bounds.expand(nodes_[n.left].bounds);
+            n.bounds.expand(nodes_[n.right].bounds);
+        }
+    }
+}
+
 std::vector<Aabb> triangleBounds(const Mesh& m) {
     std::vector<Aabb> out(m.indices.size() / 3);
 
@@ -183,26 +202,50 @@ bool intersectTriangle(const Mesh& m, uint32_t t, const Ray& ray, Hit& hit) {
     return true;
 }
 
-Hit Bvh::intersect(const Mesh& m, const Ray& ray) const {
+Hit Bvh::intersect(const Mesh& m, const Ray& ray, bool cutout, const Material* material) const {
     Hit result;
 
     if (nodes_.empty())
         return result;
-    uint32_t stack[64];
-    int top = 0;
-    stack[top++] = 0;
+    std::vector<uint32_t> stack{0};
 
-    while (top > 0) {
-        auto& n = nodes_[stack[--top]];
+    while (!stack.empty()) {
+        auto& n = nodes_[stack.back()];
+        stack.pop_back();
 
         if (!n.bounds.intersect(ray, result.distance))
             continue;
         if (n.count) {
-            for (uint32_t i = n.first; i < n.first + n.count; ++i)
-                intersectTriangle(m, order_[i], ray, result);
+            for (uint32_t i = n.first; i < n.first + n.count; ++i) {
+                Hit h = result;
+
+                if (!intersectTriangle(m, order_[i], ray, h))
+                    continue;
+                if (cutout && material && material->alphaMode == AlphaMode::Mask) {
+                    float alpha = material->baseColor.a;
+
+                    if (auto tex = material->baseColorMap) {
+                        auto t = h.triangle * 3;
+                        auto uv =
+                            m.vertices[m.indices[t]].uv * (1 - h.barycentric.x - h.barycentric.y) +
+                            m.vertices[m.indices[t + 1]].uv * h.barycentric.x +
+                            m.vertices[m.indices[t + 2]].uv * h.barycentric.y;
+                        int x = std::clamp(int((uv.x - std::floor(uv.x)) * tex->width), 0,
+                                           tex->width - 1),
+                            y = std::clamp(int((uv.y - std::floor(uv.y)) * tex->height), 0,
+                                           tex->height - 1);
+                        alpha *= tex->rgba[(y * tex->width + x) * 4 + 3] / 255.f;
+                    }
+
+                    if (alpha < material->alphaCutoff)
+                        continue;
+                }
+
+                result = h;
+            }
         } else {
-            stack[top++] = n.right;
-            stack[top++] = n.left;
+            stack.push_back(n.right);
+            stack.push_back(n.left);
         }
     }
 

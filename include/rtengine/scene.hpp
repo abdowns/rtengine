@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -39,11 +40,22 @@ struct Mesh {
     std::string name;
 };
 
+struct TextureData {
+    int width = 0, height = 0;
+    std::vector<uint8_t> rgba;
+    std::string name;
+};
+
+enum class AlphaMode { Opaque, Mask, Blend };
+
 struct Material {
     std::string name;
     glm::vec4 baseColor{1};
     glm::vec3 emissive{0};
-    float metallic = 0, roughness = 0.5f;
+    float metallic = 0, roughness = 0.5f, alphaCutoff = 0.5f;
+    AlphaMode alphaMode = AlphaMode::Opaque;
+    bool doubleSided = false;
+    std::shared_ptr<const TextureData> baseColorMap;
 };
 
 struct Camera {
@@ -58,6 +70,7 @@ struct Entity {
     Transform transform;
     MeshHandle mesh;
     MaterialHandle material;
+    bool visible = true;
 };
 
 class Scene {
@@ -73,6 +86,10 @@ class Scene {
     const Material& material(MaterialHandle) const;
     std::vector<EntityHandle> entities() const;
 
+    uint64_t topologyRevision() const {
+        return topology_;
+    }
+
   private:
     struct Slot {
         Entity value;
@@ -84,6 +101,7 @@ class Scene {
     std::vector<uint32_t> free_;
     std::vector<Mesh> meshes_;
     std::vector<Material> materials_;
+    uint64_t topology_ = 1;
 };
 
 void generateNormals(Mesh&);
