@@ -43,6 +43,16 @@ add_library(rtengine_renderer src/renderer.cpp)
 target_include_directories(rtengine_renderer PRIVATE ${CMAKE_BINARY_DIR})
 target_link_libraries(rtengine_renderer PUBLIC rtengine_core PRIVATE glad)
 
+FetchContent_Declare(stb GIT_REPOSITORY https://github.com/nothings/stb.git GIT_TAG master GIT_SHALLOW TRUE)
+FetchContent_Declare(cgltf GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git GIT_TAG v1.15 GIT_SHALLOW TRUE)
+FetchContent_Declare(tinyobj GIT_REPOSITORY https://github.com/tinyobjloader/tinyobjloader.git GIT_TAG v2.0.0rc13 GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(stb cgltf tinyobj)
+
+add_library(rtengine_importers src/assets.cpp)
+target_include_directories(rtengine_importers PRIVATE ${stb_SOURCE_DIR} ${cgltf_SOURCE_DIR})
+target_link_libraries(rtengine_importers PUBLIC rtengine_core PRIVATE tinyobjloader)
+target_compile_definitions(rtengine_importers PRIVATE GLM_ENABLE_EXPERIMENTAL)
+
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
@@ -56,13 +66,15 @@ target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/
 target_link_libraries(imgui PUBLIC glfw)
 
 add_executable(rtengine_demo demo/main.cpp demo/camera_input.cpp)
-target_link_libraries(rtengine_demo PRIVATE rtengine_renderer glfw imgui)
+target_link_libraries(rtengine_demo PRIVATE rtengine_renderer rtengine_importers glfw imgui)
+target_compile_definitions(rtengine_demo PRIVATE RT_DEMO_ASSET_DIR="${CMAKE_SOURCE_DIR}/demo/assets")
 
 if(RTENGINE_BUILD_TESTS)
   enable_testing()
 
   add_executable(rtengine_tests tests/tests.cpp)
-  target_link_libraries(rtengine_tests PRIVATE rtengine_core)
+  target_link_libraries(rtengine_tests PRIVATE rtengine_core rtengine_importers)
+  target_compile_definitions(rtengine_tests PRIVATE RT_TEST_ASSET_DIR="${CMAKE_SOURCE_DIR}/demo/assets")
   add_test(NAME rtengine_tests COMMAND rtengine_tests)
 
   add_executable(rtengine_render_tests tests/render_tests.cpp)
