@@ -1,0 +1,16 @@
+# rtengine demo asset mit
+mtllib wedge.mtl
+o wedge
+v -0.8 0 -0.6
+v 0.8 0 -0.6
+v 0.8 0 0.6
+v -0.8 0 0.6
+v -0.8 1.2 0
+v 0.8 1.2 0
+usemtl clay
+f 1 3 2
+f 1 4 3
+f 1 2 6 5
+f 4 5 6 3
+f 1 5 4
+f 2 3 6
