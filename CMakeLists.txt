@@ -21,7 +21,7 @@ FetchContent_Declare(glm GIT_REPOSITORY https://github.com/g-truc/glm.git GIT_TA
 FetchContent_Declare(glad GIT_REPOSITORY https://github.com/Dav1dde/glad.git GIT_TAG v0.1.36 GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(glm glad)
 
-add_library(rtengine_core src/scene.cpp src/bvh.cpp)
+add_library(rtengine_core src/scene.cpp src/bvh.cpp src/camera_controller.cpp)
 target_include_directories(rtengine_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(rtengine_core PUBLIC glm::glm)
 target_compile_features(rtengine_core PUBLIC cxx_std_20)
@@ -43,10 +43,30 @@ add_library(rtengine_renderer src/renderer.cpp)
 target_include_directories(rtengine_renderer PRIVATE ${CMAKE_BINARY_DIR})
 target_link_libraries(rtengine_renderer PUBLIC rtengine_core PRIVATE glad)
 
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(glfw GIT_REPOSITORY https://github.com/glfw/glfw.git GIT_TAG 3.4 GIT_SHALLOW TRUE)
+FetchContent_Declare(imgui GIT_REPOSITORY https://github.com/ocornut/imgui.git GIT_TAG v1.91.9b GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(glfw imgui)
+
+add_library(imgui STATIC ${imgui_SOURCE_DIR}/imgui.cpp ${imgui_SOURCE_DIR}/imgui_draw.cpp ${imgui_SOURCE_DIR}/imgui_tables.cpp ${imgui_SOURCE_DIR}/imgui_widgets.cpp ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp)
+target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+target_link_libraries(imgui PUBLIC glfw)
+
+add_executable(rtengine_demo demo/main.cpp demo/camera_input.cpp)
+target_link_libraries(rtengine_demo PRIVATE rtengine_renderer glfw imgui)
+
 if(RTENGINE_BUILD_TESTS)
   enable_testing()
 
   add_executable(rtengine_tests tests/tests.cpp)
   target_link_libraries(rtengine_tests PRIVATE rtengine_core)
   add_test(NAME rtengine_tests COMMAND rtengine_tests)
+
+  add_executable(rtengine_render_tests tests/render_tests.cpp)
+  target_link_libraries(rtengine_render_tests PRIVATE rtengine_renderer glfw)
+  add_test(NAME rtengine_render_tests COMMAND rtengine_render_tests)
+  set_tests_properties(rtengine_render_tests PROPERTIES SKIP_RETURN_CODE 77)
 endif()
