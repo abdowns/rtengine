@@ -7,6 +7,9 @@
 #include <tiny_obj_loader.h>
 
 #define STB_IMAGE_IMPLEMENTATION
+#include <climits>
+#include <cstring>
+#include <fstream>
 #include <functional>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
@@ -17,6 +20,62 @@
 namespace rt {
 
 namespace {
+std::vector<uint8_t> readFile(const std::filesystem::path& p) {
+    std::ifstream f(p, std::ios::binary);
+
+    if (!f)
+        throw std::runtime_error("Cannot open asset: " + p.string());
+
+    return {std::istreambuf_iterator<char>(f), {}};
+}
+
+std::vector<uint8_t> base64(std::string_view s) {
+    std::vector<uint8_t> out;
+    uint32_t value = 0;
+    int bits = 0;
+
+    for (char c : s) {
+        if (c == '=')
+            break;
+        auto pos =
+            std::string_view("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+                .find(c);
+
+        if (pos == std::string_view::npos)
+            throw std::runtime_error("Invalid base64 asset URI");
+
+        value = (value << 6) | uint32_t(pos);
+        bits += 6;
+
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(uint8_t(value >> bits));
+        }
+    }
+
+    return out;
+}
+
+std::shared_ptr<const TextureData> decode(const std::vector<uint8_t>& bytes,
+                                          const std::string& name) {
+    if (bytes.size() > INT_MAX)
+        throw std::runtime_error("Image exceeds decoder size limit: " + name);
+
+    int w, h, c;
+    auto pixels = stbi_load_from_memory(bytes.data(), int(bytes.size()), &w, &h, &c, 4);
+
+    if (!pixels)
+        throw std::runtime_error("Cannot decode image " + name + ": " + stbi_failure_reason());
+
+    auto t = std::make_shared<TextureData>();
+    t->width = w;
+    t->height = h;
+    t->name = name;
+    t->rgba.assign(pixels, pixels + size_t(w) * h * 4);
+    stbi_image_free(pixels);
+    return t;
+}
+
 Transform decompose(const glm::mat4& m) {
     Transform t;
     glm::vec3 skew;
@@ -54,47 +113,86 @@ struct AssetLoader::Impl {
 
         if (auto it = textures.find(key); it != textures.end())
             return it->second;
-        int w, h, c;
-        auto pixels = stbi_load(key.c_str(), &w, &h, &c, 4);
-
-        if (!pixels)
-            throw std::runtime_error("Cannot load image " + key + ": " + stbi_failure_reason());
-
-        auto t = std::make_shared<TextureData>();
-        t->width = w;
-        t->height = h;
-        t->name = key;
-        t->rgba.assign(pixels, pixels + size_t(w) * h * 4);
-        stbi_image_free(pixels);
-        return textures[key] = t;
+        return textures[key] = decode(readFile(p), key);
     }
 
     Cached gltf(const std::filesystem::path& path) {
         cgltf_options options{};
         cgltf_data* raw = nullptr;
+        auto status = cgltf_parse_file(&options, path.string().c_str(), &raw);
 
-        if (cgltf_parse_file(&options, path.string().c_str(), &raw) != cgltf_result_success)
-            throw std::runtime_error("glTF parse failed: " + path.string());
+        if (status != cgltf_result_success)
+            throw std::runtime_error("glTF parse failed (" + std::to_string(status) +
+                                     "): " + path.string());
         std::unique_ptr<cgltf_data, decltype(&cgltf_free)> data(raw, cgltf_free);
 
-        if (cgltf_load_buffers(&options, data.get(), path.string().c_str()) !=
-            cgltf_result_success)
+        for (size_t i = 0; i < data->extensions_required_count; ++i)
+            if (std::string_view(data->extensions_required[i]) != "KHR_materials_emissive_strength")
+                throw std::runtime_error("Unsupported required glTF extension: " +
+                                         std::string(data->extensions_required[i]));
+        status = cgltf_load_buffers(&options, data.get(), path.string().c_str());
+
+        if (status != cgltf_result_success)
             throw std::runtime_error("glTF buffer load failed: " + path.string());
 
+        if (cgltf_validate(data.get()) != cgltf_result_success)
+            throw std::runtime_error("glTF validation failed: " + path.string());
+
         Cached out;
+
+        for (size_t i = 0; i < data->extensions_used_count; ++i)
+            if (std::string_view(data->extensions_used[i]) != "KHR_materials_emissive_strength")
+                out.warnings.push_back("Using core glTF fields without optional extension: " +
+                                       std::string(data->extensions_used[i]));
 
         if (data->animations_count || data->skins_count)
             out.warnings.push_back("Animation/skinning omitted; only rigid meshes are supported");
         auto image = [&](const cgltf_texture_view& v) -> std::shared_ptr<const TextureData> {
-            if (!v.texture || !v.texture->image)
+            if (!v.texture)
                 return {};
+            if (v.texcoord != 0 || v.has_transform)
+                throw std::runtime_error("Only untransformed TEXCOORD_0 textures are supported");
 
-            auto uri = v.texture->image->uri;
+            auto im = v.texture->image;
 
-            if (!uri || std::string_view(uri).rfind("data:", 0) == 0)
-                throw std::runtime_error("Embedded glTF images are unsupported");
+            if (!im)
+                throw std::runtime_error("Compressed glTF image extensions are unsupported");
 
-            return fileTexture(path.parent_path() / uri);
+            if (v.texture->sampler &&
+                (v.texture->sampler->wrap_s != 10497 || v.texture->sampler->wrap_t != 10497))
+                out.warnings.push_back("Texture sampler wrap mode converted to repeat");
+            std::vector<uint8_t> bytes;
+
+            if (im->buffer_view) {
+                auto b = im->buffer_view;
+                auto* ptr = cgltf_buffer_view_data(b);
+
+                if (!ptr)
+                    throw std::runtime_error("Missing embedded image data");
+
+                bytes.assign(ptr, ptr + b->size);
+            } else if (im->uri) {
+                std::string uri = im->uri;
+
+                if (uri.rfind("data:", 0) == 0) {
+                    auto comma = uri.find(',');
+
+                    if (comma == std::string::npos ||
+                        uri.substr(0, comma).find(";base64") == std::string::npos)
+                        throw std::runtime_error("Only base64 data images are supported");
+
+                    bytes = base64(std::string_view(uri).substr(comma + 1));
+                } else {
+                    if (uri.find("://") != std::string::npos)
+                        throw std::runtime_error("Remote image URIs are unsupported");
+
+                    cgltf_decode_uri(uri.data());
+                    return fileTexture(path.parent_path() / uri.c_str());
+                }
+            } else
+                throw std::runtime_error("glTF image has no data");
+
+            return decode(bytes, path.string() + "#image" + std::to_string(im - data->images));
         };
 
         std::vector<MaterialHandle> mats;
@@ -119,6 +217,9 @@ struct AssetLoader::Impl {
             m.occlusionStrength = src.occlusion_texture.scale;
             m.emissive = glm::make_vec3(src.emissive_factor);
             m.emissiveMap = image(src.emissive_texture);
+
+            if (src.has_emissive_strength)
+                m.emissive *= src.emissive_strength.emissive_strength;
             m.alphaMode = src.alpha_mode == cgltf_alpha_mode_mask    ? AlphaMode::Mask
                           : src.alpha_mode == cgltf_alpha_mode_blend ? AlphaMode::Blend
                                                                      : AlphaMode::Opaque;
@@ -131,7 +232,11 @@ struct AssetLoader::Impl {
         defaultMat.metallic = 1;
         defaultMat.roughness = 1;
         auto fallback = scene.addMaterial(defaultMat);
+        std::unordered_map<const cgltf_primitive*, MeshHandle> meshes;
         std::function<void(cgltf_node*)> visit = [&](cgltf_node* node) {
+            if (node->skin)
+                throw std::runtime_error("Skinned nodes cannot be imported as rigid geometry");
+
             if (node->mesh) {
                 float matrix[16];
                 cgltf_node_transform_world(node, matrix);
@@ -144,57 +249,102 @@ struct AssetLoader::Impl {
                         throw std::runtime_error(
                             "Only triangle-list glTF primitives are supported");
 
-                    cgltf_accessor *position = nullptr, *normal = nullptr, *uv = nullptr;
+                    if (primitive.targets_count)
+                        out.warnings.push_back("Morph targets omitted; importing base mesh");
+                    MeshHandle handle;
 
-                    for (size_t a = 0; a < primitive.attributes_count; ++a) {
-                        auto& attr = primitive.attributes[a];
+                    if (auto it = meshes.find(&primitive); it != meshes.end())
+                        handle = it->second;
+                    else {
+                        cgltf_accessor *position = nullptr, *normal = nullptr, *uv = nullptr,
+                                       *tangent = nullptr;
 
-                        if (attr.type == cgltf_attribute_type_position)
-                            position = attr.data;
+                        for (size_t a = 0; a < primitive.attributes_count; ++a) {
+                            auto& attr = primitive.attributes[a];
 
-                        if (attr.type == cgltf_attribute_type_normal)
-                            normal = attr.data;
+                            if (attr.type == cgltf_attribute_type_position)
+                                position = attr.data;
 
-                        if (attr.type == cgltf_attribute_type_texcoord && attr.index == 0)
-                            uv = attr.data;
+                            if (attr.type == cgltf_attribute_type_normal)
+                                normal = attr.data;
+
+                            if (attr.type == cgltf_attribute_type_texcoord && attr.index == 0)
+                                uv = attr.data;
+
+                            if (attr.type == cgltf_attribute_type_tangent)
+                                tangent = attr.data;
+                        }
+
+                        if (!position)
+                            throw std::runtime_error("glTF primitive missing POSITION");
+
+                        Mesh m;
+                        m.name = node->mesh->name ? node->mesh->name : "gltf mesh";
+                        m.vertices.resize(position->count);
+                        auto unpack = [&](cgltf_accessor* acc, int components) {
+                            std::vector<float> values(m.vertices.size() * components);
+
+                            if (acc) {
+                                if (acc->count != m.vertices.size() ||
+                                    cgltf_num_components(acc->type) != cgltf_size(components))
+                                    throw std::runtime_error("Mismatched glTF attribute shape");
+
+                                if (cgltf_accessor_unpack_floats(acc, values.data(),
+                                                                 values.size()) != values.size())
+                                    throw std::runtime_error("glTF attribute decode failed");
+                            }
+
+                            return values;
+                        };
+
+                        auto pos = unpack(position, 3), norm = unpack(normal, 3),
+                             coords = unpack(uv, 2), tan = unpack(tangent, 4);
+
+                        for (size_t v = 0; v < m.vertices.size(); ++v) {
+                            auto& dst = m.vertices[v];
+                            dst.position = glm::make_vec3(&pos[v * 3]);
+
+                            if (normal)
+                                dst.normal = glm::normalize(glm::make_vec3(&norm[v * 3]));
+
+                            if (uv)
+                                dst.uv = glm::make_vec2(&coords[v * 2]);
+
+                            if (tangent)
+                                dst.tangent = glm::make_vec4(&tan[v * 4]);
+                        }
+
+                        if (primitive.indices) {
+                            m.indices.resize(primitive.indices->count);
+
+                            if (cgltf_accessor_unpack_indices(primitive.indices, m.indices.data(),
+                                                              sizeof(uint32_t),
+                                                              m.indices.size()) != m.indices.size())
+                                throw std::runtime_error(
+                                    "glTF index decode failed (sparse indices unsupported)");
+                        } else {
+                            m.indices.resize(m.vertices.size());
+
+                            for (size_t k = 0; k < m.indices.size(); ++k)
+                                m.indices[k] = uint32_t(k);
+                        }
+
+                        if (m.indices.size() % 3)
+                            throw std::runtime_error("Incomplete glTF triangles");
+
+                        for (auto idx : m.indices)
+                            if (idx >= m.vertices.size())
+                                throw std::runtime_error("glTF index out of range");
+
+                        generateNormalsAndTangents(m, !normal, !tangent);
+                        handle = scene.addMesh(std::move(m));
+                        meshes[&primitive] = handle;
                     }
 
-                    if (!position)
-                        throw std::runtime_error("glTF primitive missing POSITION");
-
-                    Mesh m;
-                    m.name = node->mesh->name ? node->mesh->name : "gltf mesh";
-                    m.vertices.resize(position->count);
-
-                    for (size_t v = 0; v < m.vertices.size(); ++v) {
-                        auto& dst = m.vertices[v];
-                        cgltf_accessor_read_float(position, v, glm::value_ptr(dst.position), 3);
-
-                        if (normal)
-                            cgltf_accessor_read_float(normal, v, glm::value_ptr(dst.normal), 3);
-
-                        if (uv)
-                            cgltf_accessor_read_float(uv, v, glm::value_ptr(dst.uv), 2);
-                    }
-
-                    if (primitive.indices) {
-                        m.indices.resize(primitive.indices->count);
-
-                        for (size_t k = 0; k < m.indices.size(); ++k)
-                            m.indices[k] =
-                                uint32_t(cgltf_accessor_read_index(primitive.indices, k));
-                    } else {
-                        m.indices.resize(m.vertices.size());
-
-                        for (size_t k = 0; k < m.indices.size(); ++k)
-                            m.indices[k] = uint32_t(k);
-                    }
-
-                    generateNormalsAndTangents(m, !normal, true);
                     auto mat = primitive.material ? mats.at(primitive.material - data->materials)
                                                   : fallback;
-                    out.parts.push_back({node->name ? node->name : "gltf node", transform,
-                                         scene.addMesh(std::move(m)), mat});
+                    out.parts.push_back(
+                        {node->name ? node->name : "gltf node", transform, handle, mat});
                 }
             }
 
@@ -300,9 +450,12 @@ ImportResult AssetLoader::import(const std::filesystem::path& path) {
 
     if (it == impl_->models.end()) {
         auto ext = path.extension().string();
+
+        for (auto& c : ext)
+            c = char(std::tolower(static_cast<unsigned char>(c)));
         Impl::Cached cached;
 
-        if (ext == ".gltf")
+        if (ext == ".gltf" || ext == ".glb")
             cached = impl_->gltf(path);
         else if (ext == ".obj")
             cached = impl_->obj(path);

@@ -6,17 +6,21 @@
 namespace rt {
 struct ImportResult {
     std::vector<EntityHandle> entities;
+    std::vector<std::string> warnings;
 };
 
 class AssetLoader {
   public:
     explicit AssetLoader(Scene&);
+    ~AssetLoader();
+    AssetLoader(AssetLoader&&) noexcept;
+    AssetLoader& operator=(AssetLoader&&) noexcept;
     ImportResult import(const std::filesystem::path&);
+    std::shared_ptr<const TextureData> loadTexture(const std::filesystem::path&);
+    void clearCache();
 
   private:
-    ImportResult importGltf(const std::filesystem::path&);
-    ImportResult importObj(const std::filesystem::path&);
-
-    Scene* scene_;
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };
 } // namespace rt

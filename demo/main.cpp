@@ -62,7 +62,12 @@ struct Demo {
         add("transparent panel", box, glassMat, {2, 1.6f, 2.4f}, {2.5f, 2.8f, .08f});
         add("red box", box, redMat, {-1.5f, .5f, -1.5f});
         add("tall box", box, gray, {.5f, 1, -2}, {1, 2, 1});
-        auto obj = loader.import(RT_DEMO_ASSET_DIR "/wedge.obj");
+
+        for (auto h : loader.import(std::string(RT_DEMO_ASSET_DIR) + "/crystal.gltf").entities) {
+            (void)h;
+        }
+
+        auto obj = loader.import(std::string(RT_DEMO_ASSET_DIR) + "/wedge.obj");
 
         for (auto h : obj.entities)
             scene.entity(h).transform.position = {-1, 0, 2};
