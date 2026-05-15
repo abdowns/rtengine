@@ -6,6 +6,10 @@
 #include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Body/BodyLock.h>
+#include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/ContactListener.h>
+#include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
@@ -18,6 +22,7 @@
 #include <rtengine/physics.hpp>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 
 namespace rt {
 
@@ -67,6 +72,14 @@ glm::quat from(JPH::QuatArg q) {
     return {q.GetW(), q.GetX(), q.GetY(), q.GetZ()};
 }
 
+uint64_t encode(EntityHandle h) {
+    return (uint64_t(h.generation) << 32) | h.index;
+}
+
+EntityHandle decode(uint64_t v) {
+    return {uint32_t(v), uint32_t(v >> 32)};
+}
+
 class BroadLayers final : public JPH::BroadPhaseLayerInterface {
   public:
     uint32_t GetNumBroadPhaseLayers() const override {
@@ -111,24 +124,72 @@ struct PhysicsWorld::Impl {
     struct Record {
         JPH::BodyID id;
         EntityHandle entity;
-        Transform previous, current;
+        MotionType motion;
+        Transform previous, current, target;
         uint32_t generation = 1;
         bool active = false;
     };
 
     std::vector<Record> records;
     std::vector<uint32_t> free;
+    std::unordered_map<uint32_t, EntityHandle> bodyEntities;
     double accumulator = 0;
     static constexpr double step = 1.0 / 60.0;
 
+    struct Listener final : public JPH::ContactListener {
+        Impl& owner;
+        std::mutex mutex;
+        std::vector<ContactEvent> events;
+        bool overflow = false;
+
+        explicit Listener(Impl& o) : owner(o) {}
+        void emit(ContactEvent::Type type, const JPH::Body& a, const JPH::Body& b,
+                  const JPH::ContactManifold& m) {
+            std::lock_guard lock(mutex);
+
+            if (events.size() >= 65536) {
+                overflow = true;
+                return;
+            }
+
+            events.push_back({type, decode(a.GetUserData()), decode(b.GetUserData()),
+                              from(m.GetWorldSpaceContactPointOn1(0)), from(m.mWorldSpaceNormal)});
+        }
+
+        void OnContactAdded(const JPH::Body& a, const JPH::Body& b, const JPH::ContactManifold& m,
+                            JPH::ContactSettings&) override {
+            emit(ContactEvent::Type::Begin, a, b, m);
+        }
+
+        void OnContactPersisted(const JPH::Body& a, const JPH::Body& b,
+                                const JPH::ContactManifold& m, JPH::ContactSettings&) override {
+            emit(ContactEvent::Type::Persist, a, b, m);
+        }
+
+        void OnContactRemoved(const JPH::SubShapeIDPair& pair) override {
+            std::lock_guard lock(mutex);
+            auto a = owner.bodyEntities.find(pair.GetBody1ID().GetIndexAndSequenceNumber()),
+                 b = owner.bodyEntities.find(pair.GetBody2ID().GetIndexAndSequenceNumber());
+
+            if (events.size() >= 65536) {
+                overflow = true;
+                return;
+            }
+
+            if (a != owner.bodyEntities.end() && b != owner.bodyEntities.end())
+                events.push_back({ContactEvent::Type::End, a->second, b->second, {}, {}});
+        }
+    } listener{*this};
     Impl(Scene& s, uint32_t max) : scene(s) {
         if (max == 0)
             throw std::invalid_argument("maxBodies must be positive");
 
         system.Init(max, 0, max * 4, max * 4, layers, broadFilter, pairFilter);
+        system.SetContactListener(&listener);
     }
 
     ~Impl() {
+        system.SetContactListener(nullptr);
         auto& bi = system.GetBodyInterface();
 
         for (auto& r : records)
@@ -149,6 +210,14 @@ struct PhysicsWorld::Impl {
     const Record& record(BodyHandle h) const {
         return const_cast<Impl*>(this)->record(h);
     }
+
+    Transform read(const Record& r) const {
+        auto& bi = system.GetBodyInterface();
+        Transform t = r.current;
+        t.position = from(bi.GetPosition(r.id));
+        t.rotation = from(bi.GetRotation(r.id));
+        return t;
+    }
 };
 
 PhysicsWorld::PhysicsWorld(Scene& s, uint32_t max) : impl_(std::make_unique<Impl>(s, max)) {}
@@ -157,6 +226,18 @@ PhysicsWorld::~PhysicsWorld() = default;
 BodyHandle PhysicsWorld::createBody(EntityHandle e, const BodyDescription& desc) {
     auto t = impl_->scene.entity(e).transform;
     auto& c = desc.collider;
+
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(t.position[i]) || !std::isfinite(t.scale[i]) ||
+            !std::isfinite(c.halfExtent[i]) || c.halfExtent[i] <= 0)
+            throw std::invalid_argument("Invalid body position, scale, or box dimensions");
+
+    if (!std::isfinite(glm::length(t.rotation)) || glm::length(t.rotation) < 1e-6f ||
+        !std::isfinite(desc.mass) || !std::isfinite(desc.friction) ||
+        !std::isfinite(desc.restitution) || !std::isfinite(c.radius) ||
+        !std::isfinite(c.halfHeight) || c.radius <= 0 || c.halfHeight < 0)
+        throw std::invalid_argument("Non-finite or invalid body/collider properties");
+
     t.rotation = glm::normalize(t.rotation);
 
     for (auto& r : impl_->records)
@@ -171,24 +252,29 @@ BodyHandle PhysicsWorld::createBody(EntityHandle e, const BodyDescription& desc)
         throw std::invalid_argument("Triangle-mesh colliders must be static");
 
     JPH::RefConst<JPH::Shape> shape;
+    auto checked = [&](JPH::ShapeSettings::ShapeResult result) {
+        if (result.HasError())
+            throw std::runtime_error("Collider creation failed: " +
+                                     std::string(result.GetError().c_str()));
+        return result.Get();
+    };
 
     switch (c.type) {
     case ColliderType::Box:
-        shape = JPH::BoxShapeSettings(vec(c.halfExtent * t.scale)).Create().Get();
+        shape = checked(JPH::BoxShapeSettings(vec(c.halfExtent * t.scale)).Create());
         break;
     case ColliderType::Sphere:
         if (glm::length(t.scale - glm::vec3(t.scale.x)) > 1e-5f)
             throw std::invalid_argument("Sphere requires uniform scale");
 
-        shape = JPH::SphereShapeSettings(c.radius * t.scale.x).Create().Get();
+        shape = checked(JPH::SphereShapeSettings(c.radius * t.scale.x).Create());
         break;
     case ColliderType::Capsule:
         if (glm::length(t.scale - glm::vec3(t.scale.x)) > 1e-5f)
             throw std::invalid_argument("Capsule requires uniform scale");
 
-        shape = JPH::CapsuleShapeSettings(c.halfHeight * t.scale.x, c.radius * t.scale.x)
-                    .Create()
-                    .Get();
+        shape = checked(
+            JPH::CapsuleShapeSettings(c.halfHeight * t.scale.x, c.radius * t.scale.x).Create());
         break;
     case ColliderType::ConvexHull: {
         JPH::Array<JPH::Vec3> pts;
@@ -199,7 +285,7 @@ BodyHandle PhysicsWorld::createBody(EntityHandle e, const BodyDescription& desc)
         } else
             for (auto p : c.points)
                 pts.push_back(vec(p * t.scale));
-        shape = JPH::ConvexHullShapeSettings(pts).Create().Get();
+        shape = checked(JPH::ConvexHullShapeSettings(pts).Create());
         break;
     }
 
@@ -211,13 +297,10 @@ BodyHandle PhysicsWorld::createBody(EntityHandle e, const BodyDescription& desc)
             tris.emplace_back(vec(m.vertices[m.indices[i]].position * t.scale),
                               vec(m.vertices[m.indices[i + 1]].position * t.scale),
                               vec(m.vertices[m.indices[i + 2]].position * t.scale));
-        shape = JPH::MeshShapeSettings(tris).Create().Get();
+        shape = checked(JPH::MeshShapeSettings(tris).Create());
         break;
     }
     }
-
-    if (!shape)
-        throw std::runtime_error("Collider creation failed");
 
     auto motion = desc.motion == MotionType::Static      ? JPH::EMotionType::Static
                   : desc.motion == MotionType::Kinematic ? JPH::EMotionType::Kinematic
@@ -226,6 +309,7 @@ BodyHandle PhysicsWorld::createBody(EntityHandle e, const BodyDescription& desc)
                                        desc.motion == MotionType::Static ? 0 : 1);
     settings.mFriction = desc.friction;
     settings.mRestitution = desc.restitution;
+    settings.mUserData = encode(e);
 
     if (desc.motion == MotionType::Dynamic) {
         settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
@@ -256,8 +340,10 @@ BodyHandle PhysicsWorld::createBody(EntityHandle e, const BodyDescription& desc)
     auto& r = impl_->records[idx];
     r.id = id;
     r.entity = e;
-    r.previous = r.current = t;
+    r.motion = desc.motion;
+    r.previous = r.current = r.target = t;
     r.active = true;
+    impl_->bodyEntities[id.GetIndexAndSequenceNumber()] = e;
     return {idx, r.generation};
 }
 
@@ -266,6 +352,7 @@ void PhysicsWorld::destroyBody(BodyHandle h) {
     auto& bi = impl_->system.GetBodyInterface();
     bi.RemoveBody(r.id);
     bi.DestroyBody(r.id);
+    impl_->bodyEntities.erase(r.id.GetIndexAndSequenceNumber());
     r.active = false;
     ++r.generation;
     impl_->free.push_back(h.index);
@@ -284,23 +371,37 @@ void PhysicsWorld::advance(double seconds) {
 
     impl_->accumulator += std::min(seconds, 0.25);
     int steps = 0;
-    auto& bi = impl_->system.GetBodyInterface();
 
     while (impl_->accumulator >= Impl::step && steps++ < 8) {
         for (auto& r : impl_->records)
-            r.previous = r.current;
-        impl_->system.Update(float(Impl::step), 1, &impl_->allocator, &impl_->jobs);
+            if (r.active) {
+                r.previous = r.current;
+
+                if (r.motion == MotionType::Kinematic)
+                    impl_->system.GetBodyInterface().MoveKinematic(
+                        r.id, pos(r.target.position), quat(r.target.rotation), float(Impl::step));
+            }
+
+        auto error = impl_->system.Update(float(Impl::step), 1, &impl_->allocator, &impl_->jobs);
+
+        if (error != JPH::EPhysicsUpdateError::None)
+            throw std::runtime_error("Jolt update capacity exceeded");
 
         for (auto& r : impl_->records)
-            if (r.active) {
-                r.current.position = from(bi.GetPosition(r.id));
-                r.current.rotation = from(bi.GetRotation(r.id));
-            }
+            if (r.active)
+                r.current = impl_->read(r);
         impl_->accumulator -= Impl::step;
     }
 
     if (impl_->accumulator >= Impl::step)
         impl_->accumulator = std::fmod(impl_->accumulator, Impl::step);
+    {
+        std::lock_guard lock(impl_->listener.mutex);
+
+        if (impl_->listener.overflow)
+            throw std::runtime_error(
+                "Contact event queue capacity exceeded; call takeContacts every frame");
+    }
 }
 
 void PhysicsWorld::synchronize() {
@@ -342,19 +443,56 @@ void PhysicsWorld::setPose(BodyHandle h, const Transform& t) {
 
     impl_->system.GetBodyInterface().SetPositionAndRotation(r.id, pos(t.position), quat(t.rotation),
                                                             JPH::EActivation::Activate);
-    r.previous = r.current = t;
+    r.previous = r.current = r.target = t;
 
     if (impl_->scene.alive(r.entity))
         impl_->scene.entity(r.entity).transform = t;
 }
 
 Transform PhysicsWorld::pose(BodyHandle h) const {
+    return impl_->read(impl_->record(h));
+}
+
+void PhysicsWorld::setKinematicTarget(BodyHandle h, const Transform& t) {
     auto& r = impl_->record(h);
-    auto& bi = impl_->system.GetBodyInterface();
-    Transform t = r.current;
-    t.position = from(bi.GetPosition(r.id));
-    t.rotation = from(bi.GetRotation(r.id));
-    return t;
+
+    if (r.motion != MotionType::Kinematic)
+        throw std::invalid_argument("Body is not kinematic");
+
+    if (glm::length(t.scale - r.current.scale) > 1e-5f)
+        throw std::invalid_argument("Kinematic target cannot change scale");
+
+    r.target = t;
+}
+
+std::optional<PhysicsRayHit> PhysicsWorld::rayQuery(glm::vec3 origin, glm::vec3 direction,
+                                                    float max) const {
+    if (max <= 0 || glm::length(direction) < 1e-8f)
+        throw std::invalid_argument("Invalid physics ray");
+
+    direction = glm::normalize(direction);
+    JPH::RRayCast ray(pos(origin), vec(direction * max));
+    JPH::RayCastResult hit;
+
+    if (!impl_->system.GetNarrowPhaseQuery().CastRay(ray, hit))
+        return {};
+    JPH::BodyLockRead lock(impl_->system.GetBodyLockInterface(), hit.mBodyID);
+
+    if (!lock.Succeeded())
+        return {};
+    auto p = origin + direction * (hit.mFraction * max);
+    auto& b = lock.GetBody();
+    return PhysicsRayHit{decode(b.GetUserData()), p,
+                         from(b.GetWorldSpaceSurfaceNormal(hit.mSubShapeID2, pos(p))),
+                         hit.mFraction * max};
+}
+
+std::vector<ContactEvent> PhysicsWorld::takeContacts() {
+    std::lock_guard lock(impl_->listener.mutex);
+    std::vector<ContactEvent> out;
+    out.swap(impl_->listener.events);
+    impl_->listener.overflow = false;
+    return out;
 }
 
 float PhysicsWorld::interpolationAlpha() const {
