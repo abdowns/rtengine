@@ -53,6 +53,27 @@ target_include_directories(rtengine_importers PRIVATE ${stb_SOURCE_DIR} ${cgltf_
 target_link_libraries(rtengine_importers PUBLIC rtengine_core PRIVATE tinyobjloader)
 target_compile_definitions(rtengine_importers PRIVATE GLM_ENABLE_EXPERIMENTAL)
 
+set(TARGET_UNIT_TESTS OFF CACHE BOOL "" FORCE)
+set(TARGET_HELLO_WORLD OFF CACHE BOOL "" FORCE)
+set(TARGET_PERFORMANCE_TEST OFF CACHE BOOL "" FORCE)
+set(TARGET_SAMPLES OFF CACHE BOOL "" FORCE)
+set(TARGET_VIEWER OFF CACHE BOOL "" FORCE)
+set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE BOOL "" FORCE)
+set(OVERRIDE_CXX_FLAGS OFF CACHE BOOL "" FORCE)
+set(ENABLE_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
+set(GENERATE_DEBUG_SYMBOLS OFF CACHE BOOL "" FORCE)
+set(DEBUG_RENDERER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+set(PROFILER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+set(ENABLE_OBJECT_STREAM OFF CACHE BOOL "" FORCE)
+set(USE_AVX2 OFF CACHE BOOL "" FORCE)
+set(USE_AVX512 OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(jolt GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git GIT_TAG v5.3.0 GIT_SHALLOW TRUE SOURCE_SUBDIR Build)
+FetchContent_MakeAvailable(jolt)
+
+add_library(rtengine_physics src/physics.cpp)
+target_link_libraries(rtengine_physics PUBLIC rtengine_core PRIVATE Jolt)
+
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
@@ -66,14 +87,19 @@ target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/
 target_link_libraries(imgui PUBLIC glfw)
 
 add_executable(rtengine_demo demo/main.cpp demo/camera_input.cpp)
-target_link_libraries(rtengine_demo PRIVATE rtengine_renderer rtengine_importers glfw imgui)
+target_link_libraries(rtengine_demo PRIVATE rtengine_renderer rtengine_importers rtengine_physics glfw imgui)
+
+if(WIN32)
+  target_link_libraries(rtengine_demo PRIVATE Psapi)
+endif()
+
 target_compile_definitions(rtengine_demo PRIVATE RT_DEMO_ASSET_DIR="${CMAKE_SOURCE_DIR}/demo/assets")
 
 if(RTENGINE_BUILD_TESTS)
   enable_testing()
 
   add_executable(rtengine_tests tests/tests.cpp)
-  target_link_libraries(rtengine_tests PRIVATE rtengine_core rtengine_importers)
+  target_link_libraries(rtengine_tests PRIVATE rtengine_core rtengine_importers rtengine_physics)
   target_compile_definitions(rtengine_tests PRIVATE RT_TEST_ASSET_DIR="${CMAKE_SOURCE_DIR}/demo/assets")
   add_test(NAME rtengine_tests COMMAND rtengine_tests)
 
