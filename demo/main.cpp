@@ -10,6 +10,7 @@
 #include <imgui_impl_opengl3.h>
 #include <iostream>
 #include <rtengine/assets.hpp>
+#include <rtengine/physics.hpp>
 #include <rtengine/renderer.hpp>
 
 using namespace rt;
@@ -18,16 +19,20 @@ namespace {
 struct Demo {
     Scene scene;
     AssetLoader loader{scene};
+    PhysicsWorld physics{scene};
     Camera camera;
+    std::vector<std::pair<BodyHandle, Transform>> resetBodies;
 
     Demo() {
         auto add = [&](std::string name, MeshHandle mesh, MaterialHandle mat, glm::vec3 position,
                        glm::vec3 scale = glm::vec3(1)) {
-            auto& e = scene.entity(scene.createEntity(name));
+            auto h = scene.createEntity(name);
+            auto& e = scene.entity(h);
             e.mesh = mesh;
             e.material = mat;
             e.transform.position = position;
             e.transform.scale = scale;
+            return h;
         };
 
         auto box = scene.addMesh(makeBox());
@@ -53,15 +58,16 @@ struct Demo {
         glass.alphaMode = AlphaMode::Blend;
         glass.doubleSided = true;
         auto glassMat = scene.addMaterial(glass);
-        add("ground", box, gray, {0, -.5f, 0}, {14, 1, 14});
+        auto ground = add("ground", box, gray, {0, -.5f, 0}, {14, 1, 14});
+        BodyDescription staticBody;
+        staticBody.motion = MotionType::Static;
+        physics.createBody(ground, staticBody);
         add("red bounce wall", box, redMat, {-6, 2, 0}, {.25f, 4, 10});
         add("blue bounce wall", box, blueMat, {6, 2, 0}, {.25f, 4, 10});
         add("back wall", box, gray, {0, 2, -5}, {12, 4, .25f});
         auto sphere = scene.addMesh(makeSphere(.7f, 48, 32));
         add("reflective sphere", sphere, metalMat, {1.8f, 1.1f, -.3f});
         add("transparent panel", box, glassMat, {2, 1.6f, 2.4f}, {2.5f, 2.8f, .08f});
-        add("red box", box, redMat, {-1.5f, .5f, -1.5f});
-        add("tall box", box, gray, {.5f, 1, -2}, {1, 2, 1});
 
         for (auto h : loader.import(std::string(RT_DEMO_ASSET_DIR) + "/crystal.gltf").entities) {
             (void)h;
@@ -71,6 +77,18 @@ struct Demo {
 
         for (auto h : obj.entities)
             scene.entity(h).transform.position = {-1, 0, 2};
+
+        for (int i = 0; i < 16; ++i) {
+            Transform t;
+            t.position = {float(i % 4) - 1.5f, 2.5f + float(i / 4) * .75f, -2 + float((i / 4) % 2)};
+            t.scale = {.5f, .5f, .5f};
+            auto e = add("dynamic box", box, i % 2 ? redMat : gray, t.position, t.scale);
+            BodyDescription d;
+            d.mass = .5f;
+            d.restitution = .1f;
+            auto body = physics.createBody(e, d);
+            resetBodies.push_back({body, t});
+        }
 
         auto light = [&](std::string name, Light l, glm::vec3 p,
                          glm::quat rotation = glm::quat(1, 0, 0, 0)) {
@@ -109,6 +127,13 @@ struct Demo {
         camera.transform.rotation = glm::quatLookAt(
             glm::normalize(glm::vec3(0, 1, 0) - camera.transform.position), glm::vec3(0, 1, 0));
     }
+
+    void reset() {
+        for (auto& [body, t] : resetBodies) {
+            physics.setPose(body, t);
+            physics.setVelocity(body, {0, 0, 0});
+        }
+    }
 };
 } // namespace
 int main() {
@@ -142,6 +167,7 @@ int main() {
             ImGui::StyleColorsDark();
             ImGui_ImplGlfw_InitForOpenGL(window, true);
             ImGui_ImplOpenGL3_Init("#version 410 core");
+            bool paused = false;
             CameraController cameraController;
             GlfwCameraInput cameraInput(window);
             auto previous = std::chrono::steady_clock::now();
@@ -159,6 +185,13 @@ int main() {
                 auto input = cameraInput.poll(!ImGui::GetIO().WantCaptureKeyboard,
                                               !ImGui::GetIO().WantCaptureMouse);
                 cameraController.update(demo.camera, input, float(dt));
+
+                if (!paused) {
+                    demo.physics.advance(dt);
+                    demo.physics.synchronize();
+                }
+
+                demo.physics.takeContacts();
                 int width, height;
                 glfwGetFramebufferSize(window, &width, &height);
 
@@ -218,6 +251,12 @@ int main() {
 
                 if (changed)
                     renderer.setSettings(settings);
+                ImGui::Checkbox("Pause physics", &paused);
+
+                if (ImGui::Button("Reset bodies")) {
+                    demo.reset();
+                    renderer.resetHistory();
+                }
 
                 if (ImGui::Button("Reset lighting history"))
                     renderer.resetHistory();
