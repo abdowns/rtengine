@@ -10,14 +10,17 @@ rt::CameraInput GlfwCameraInput::poll(bool keyboardAllowed, bool mouseAllowed) {
     const bool focused = glfwGetWindowAttrib(window_, GLFW_FOCUSED) == GLFW_TRUE;
     const bool capture =
         focused && mouseAllowed && glfwGetMouseButton(window_, bindings.lookButton) == GLFW_PRESS;
+    double x, y;
 
     if (capture != captured_) {
         captured_ = capture;
         glfwSetInputMode(window_, GLFW_CURSOR, capture ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+        // skip capture delta to avoid jumps
+        glfwGetCursorPos(window_, &lastX_, &lastY_);
     }
 
-    double x, y;
     glfwGetCursorPos(window_, &x, &y);
+
     if (captured_)
         input.mouseDelta = {float(x - lastX_), float(y - lastY_)};
     lastX_ = x;
