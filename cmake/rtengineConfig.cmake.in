@@ -1,0 +1,15 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(glm CONFIG)
+
+if(@RTENGINE_BUILD_RENDERER@)
+  find_dependency(glad CONFIG)
+endif()
+
+if(@RTENGINE_BUILD_PHYSICS@)
+  find_dependency(Jolt CONFIG)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/rtengineTargets.cmake")
+check_required_components(rtengine)
