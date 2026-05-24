@@ -2,8 +2,7 @@
 #include "common.glsl"
 
 uniform samplerBuffer blasNodes, tlasNodes, triangles, instances, instanceOrder;
-uniform sampler2D normalRoughness, baseMetallic, depthMap, reflectionHistory, giHistory;
-uniform mat4 previousViewProjection;
+uniform sampler2D normalRoughness, baseMetallic, depthMap;
 uniform int instanceCount, frameIndex;
 uniform bool useReflections, useGI;
 
@@ -200,22 +199,16 @@ void main() {
     s.metallic = b.w;
     s.ao = 1.;
     vec3 p = worldPosition(uv, depth), v = normalize(cameraPosition - p);
-    vec3 o = p + s.normal * .001;
-    rng = uint(gl_FragCoord.x) * 1973u + uint(gl_FragCoord.y) * 9277u + uint(frameIndex) * 26699u;
+    vec3 o = p + s.normal * max(.001, .0002 * length(cameraPosition - p));
+    rng =
+        uint(gl_FragCoord.x) * 1973u + uint(gl_FragCoord.y) * 9277u + uint(frameIndex + 1) * 26699u;
     rng |= 1u;
     mat3 local = basis(s.normal);
-    vec4 previous = previousViewProjection * vec4(p, 1);
-    vec2 previousUV = previous.xy / previous.w * .5 + .5;
-    float blend = frameIndex == 0 || any(lessThan(previousUV, vec2(0))) ||
-                          any(greaterThan(previousUV, vec2(1)))
-                      ? 1.
-                      : .1;
 
     if (useGI) {
         float angle = 2. * PI * randomValue(), r = sqrt(randomValue());
         vec3 d = local * vec3(r * cos(angle), r * sin(angle), sqrt(max(0., 1. - r * r)));
-        vec3 value = min(incoming(o, d), vec3(50));
-        gi = vec4(mix(texture(giHistory, previousUV).rgb, value, blend), 1);
+        gi = vec4(min(incoming(o, d), vec3(50)), 1);
     }
 
     if (useReflections) {
@@ -229,7 +222,6 @@ void main() {
         vec3 f = fresnel(vh, mix(vec3(.04), s.base, s.metallic));
         float weight =
             geometryTerm(nv, s.roughness) * geometryTerm(nl, s.roughness) * vh / max(nv * nh, 1e-5);
-        vec3 value = nl > 0. ? min(incoming(o, d) * f * weight, vec3(50)) : vec3(0);
-        reflection = vec4(mix(texture(reflectionHistory, previousUV).rgb, value, blend), 1);
+        reflection = vec4(nl > 0. ? min(incoming(o, d) * f * weight, vec3(50)) : vec3(0), 1);
     }
 }
