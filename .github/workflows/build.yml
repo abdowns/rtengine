@@ -3,18 +3,32 @@ on: [push, pull_request]
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y xorg-dev libgl1-mesa-dev xvfb
+        run: sudo apt-get update && sudo apt-get install -y libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libwayland-dev libxkbcommon-dev mesa-utils libgl1-mesa-dev xvfb
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-      - run: cmake --build build --config Release
+      - run: cmake --build build --config Release --parallel 3
       - if: runner.os != 'Linux'
         run: ctest --test-dir build -C Release --output-on-failure
       - if: runner.os == 'Linux'
         run: xvfb-run -a ctest --test-dir build -C Release --output-on-failure
+      - run: cmake --install build --config Release --prefix install
+      - run: cmake -S examples/minimal -B consumer -DCMAKE_PREFIX_PATH=${{ github.workspace }}/install
+      - run: cmake --build consumer --config Release
       - if: runner.os == 'Linux'
-        run: xvfb-run -a ./build/rtengine_demo --frames 4 --screenshot smoke.ppm
+        run: xvfb-run -a ./build/rtengine_demo --hidden --no-ui --frames 4 --warmup 0 --width 320 --height 180 --screenshot build/smoke.ppm
+  minimal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DRTENGINE_BUILD_RENDERER=OFF -DRTENGINE_BUILD_IMPORTERS=OFF -DRTENGINE_BUILD_PHYSICS=OFF -DRTENGINE_BUILD_DEMO=OFF
+      - run: cmake --build build --parallel 2
+      - run: ctest --test-dir build --output-on-failure

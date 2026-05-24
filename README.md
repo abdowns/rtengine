@@ -12,14 +12,16 @@ cmake --build build --config Release --parallel
 ./build/rtengine_demo
 ```
 
-On Windows, run `build/Release/rtengine_demo.exe`.
+On Windows, run `build/Release/rtengine_demo.exe`. On headless Linux, run tests with `xvfb-run -a ctest --test-dir build --output-on-failure`
 
 To use the library from CMake:
 
 ```cmake
 add_subdirectory(path/to/rtengine)
-target_link_libraries(my_app PRIVATE rtengine::rtengine)
+target_link_libraries(my_app PRIVATE rtengine::renderer rtengine::importers rtengine::physics)
 ```
+
+Disable unneeded modules with `RTENGINE_BUILD_RENDERER`, `RTENGINE_BUILD_IMPORTERS`, `RTENGINE_BUILD_PHYSICS`, `RTENGINE_BUILD_DEMO`, and `RTENGINE_BUILD_TESTS`.
 
 ## Resources
 
