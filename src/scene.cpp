@@ -1,3 +1,4 @@
+#include <climits>
 #include <cmath>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -5,6 +6,33 @@
 #include <stdexcept>
 
 namespace rt {
+
+namespace {
+void validateMaterial(const Material& m) {
+    auto finite = [](float f) { return std::isfinite(f); };
+
+    for (int i = 0; i < 4; ++i)
+        if (!finite(m.baseColor[i]) || m.baseColor[i] < 0 || m.baseColor[i] > 1)
+            throw std::invalid_argument("Base color must be finite and in [0,1]");
+
+    for (int i = 0; i < 3; ++i)
+        if (!finite(m.emissive[i]) || m.emissive[i] < 0)
+            throw std::invalid_argument("Emission must be finite and nonnegative");
+
+    for (float f : {m.metallic, m.roughness, m.occlusionStrength, m.alphaCutoff})
+        if (!finite(f) || f < 0 || f > 1)
+            throw std::invalid_argument("PBR factors must be finite and in [0,1]");
+
+    if (!finite(m.normalScale) || m.normalScale < 0)
+        throw std::invalid_argument("Normal scale must be finite and nonnegative");
+
+    for (auto texture :
+         {m.baseColorMap, m.normalMap, m.metallicRoughnessMap, m.occlusionMap, m.emissiveMap})
+        if (texture && (texture->width <= 0 || texture->height <= 0 ||
+                        texture->rgba.size() != size_t(texture->width) * texture->height * 4))
+            throw std::invalid_argument("Texture requires complete RGBA8 pixels");
+}
+} // namespace
 
 glm::mat4 Transform::matrix() const {
     return glm::translate(glm::mat4(1), position) * glm::mat4_cast(rotation) *
@@ -70,12 +98,27 @@ const Entity& Scene::entity(EntityHandle h) const {
 }
 
 MeshHandle Scene::addMesh(Mesh m) {
-    if (m.vertices.empty() || m.indices.empty() || m.indices.size() % 3)
+    if (m.vertices.empty() || m.indices.empty() || m.indices.size() % 3 ||
+        m.indices.size() > INT_MAX || m.vertices.size() > UINT32_MAX)
         throw std::invalid_argument("Mesh requires indexed triangles");
 
     for (auto i : m.indices)
         if (i >= m.vertices.size())
             throw std::invalid_argument("Mesh index out of bounds");
+
+    for (auto& v : m.vertices) {
+        for (int i = 0; i < 3; ++i)
+            if (!std::isfinite(v.position[i]) || !std::isfinite(v.normal[i]))
+                throw std::invalid_argument("Mesh has non-finite positions/normals");
+
+        for (int i = 0; i < 4; ++i)
+            if (!std::isfinite(v.tangent[i]))
+                throw std::invalid_argument("Mesh has non-finite tangents");
+
+        if (!std::isfinite(v.uv.x) || !std::isfinite(v.uv.y) || glm::length(v.normal) < 1e-6f ||
+            glm::length(glm::vec3(v.tangent)) < 1e-6f)
+            throw std::invalid_argument("Mesh has invalid UVs or zero-length normal/tangent");
+    }
 
     meshes_.push_back(std::move(m));
     ++topology_;
@@ -83,8 +126,7 @@ MeshHandle Scene::addMesh(Mesh m) {
 }
 
 MaterialHandle Scene::addMaterial(Material m) {
-    m.metallic = glm::clamp(m.metallic, 0.f, 1.f);
-    m.roughness = glm::clamp(m.roughness, 0.f, 1.f);
+    validateMaterial(m);
     materials_.push_back(std::move(m));
     ++materialsRevision_;
     return {uint32_t(materials_.size() - 1), 1};
@@ -105,9 +147,8 @@ const Material& Scene::material(MaterialHandle h) const {
 }
 
 void Scene::updateMaterial(MaterialHandle h, Material m) {
-    if (h.generation != 1 || h.index >= materials_.size())
-        throw std::invalid_argument("Invalid material handle");
-
+    (void)material(h);
+    validateMaterial(m);
     materials_[h.index] = std::move(m);
     ++materialsRevision_;
 }
