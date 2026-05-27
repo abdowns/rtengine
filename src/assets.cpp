@@ -109,7 +109,7 @@ struct AssetLoader::Impl {
 
     explicit Impl(Scene& s) : scene(s) {}
     std::shared_ptr<const TextureData> fileTexture(const std::filesystem::path& p) {
-        auto key = p.string();
+        auto key = std::filesystem::weakly_canonical(p).string();
 
         if (auto it = textures.find(key); it != textures.end())
             return it->second;
@@ -147,6 +147,7 @@ struct AssetLoader::Impl {
 
         if (data->animations_count || data->skins_count)
             out.warnings.push_back("Animation/skinning omitted; only rigid meshes are supported");
+        std::unordered_map<const cgltf_image*, std::shared_ptr<const TextureData>> images;
         auto image = [&](const cgltf_texture_view& v) -> std::shared_ptr<const TextureData> {
             if (!v.texture)
                 return {};
@@ -158,6 +159,8 @@ struct AssetLoader::Impl {
             if (!im)
                 throw std::runtime_error("Compressed glTF image extensions are unsupported");
 
+            if (auto it = images.find(im); it != images.end())
+                return it->second;
             if (v.texture->sampler &&
                 (v.texture->sampler->wrap_s != 10497 || v.texture->sampler->wrap_t != 10497))
                 out.warnings.push_back("Texture sampler wrap mode converted to repeat");
@@ -187,12 +190,15 @@ struct AssetLoader::Impl {
                         throw std::runtime_error("Remote image URIs are unsupported");
 
                     cgltf_decode_uri(uri.data());
-                    return fileTexture(path.parent_path() / uri.c_str());
+                    auto t = fileTexture(path.parent_path() / uri.c_str());
+                    images[im] = t;
+                    return t;
                 }
             } else
                 throw std::runtime_error("glTF image has no data");
 
-            return decode(bytes, path.string() + "#image" + std::to_string(im - data->images));
+            return images[im] =
+                       decode(bytes, path.string() + "#image" + std::to_string(im - data->images));
         };
 
         std::vector<MaterialHandle> mats;
@@ -388,9 +394,11 @@ struct AssetLoader::Impl {
         for (auto& src : reader.GetMaterials()) {
             Material m;
             m.name = src.name;
-            m.baseColor = glm::vec4(glm::make_vec3(src.diffuse), 1);
-            m.roughness = src.roughness;
+            m.baseColor = {src.diffuse[0], src.diffuse[1], src.diffuse[2], src.dissolve};
+            m.emissive = glm::make_vec3(src.emission);
+            m.roughness = src.roughness > 0 ? src.roughness : std::sqrt(2.f / (src.shininess + 2));
             m.metallic = src.metallic;
+            m.alphaMode = src.dissolve < 1 ? AlphaMode::Blend : AlphaMode::Opaque;
             m.baseColorMap = tex(src.diffuse_texname);
             m.normalMap = tex(src.normal_texname);
             mats.push_back(scene.addMaterial(std::move(m)));
@@ -400,36 +408,54 @@ struct AssetLoader::Impl {
         auto& attrib = reader.GetAttrib();
 
         for (auto& shape : reader.GetShapes()) {
-            Mesh mesh;
-            mesh.name = shape.name;
-            bool missingNormals = false;
+            std::unordered_map<int, Mesh> groups;
+            std::unordered_map<int, bool> missingNormals;
+            size_t offset = 0;
 
-            for (auto idx : shape.mesh.indices) {
-                if (idx.vertex_index < 0 ||
-                    size_t(idx.vertex_index) * 3 + 2 >= attrib.vertices.size())
-                    throw std::runtime_error("Invalid OBJ vertex index");
+            for (size_t f = 0; f < shape.mesh.num_face_vertices.size(); ++f) {
+                int count = shape.mesh.num_face_vertices[f];
 
-                Vertex v;
-                v.position = glm::make_vec3(&attrib.vertices[size_t(idx.vertex_index) * 3]);
+                if (count != 3)
+                    throw std::runtime_error("OBJ triangulation failed");
 
-                if (idx.normal_index >= 0)
-                    v.normal = glm::make_vec3(&attrib.normals[size_t(idx.normal_index) * 3]);
-                else
-                    missingNormals = true;
+                int mat = shape.mesh.material_ids[f];
+                auto& mesh = groups[mat];
+                mesh.name = shape.name;
 
-                if (idx.texcoord_index >= 0)
-                    v.uv = glm::make_vec2(&attrib.texcoords[size_t(idx.texcoord_index) * 2]);
+                for (int k = 0; k < count; ++k) {
+                    auto idx = shape.mesh.indices[offset + k];
 
-                mesh.indices.push_back(uint32_t(mesh.vertices.size()));
-                mesh.vertices.push_back(v);
+                    if (idx.vertex_index < 0 ||
+                        size_t(idx.vertex_index) * 3 + 2 >= attrib.vertices.size())
+                        throw std::runtime_error("Invalid OBJ vertex index");
+
+                    Vertex v;
+                    v.position = glm::make_vec3(&attrib.vertices[size_t(idx.vertex_index) * 3]);
+
+                    if (idx.normal_index >= 0)
+                        v.normal = glm::make_vec3(&attrib.normals[size_t(idx.normal_index) * 3]);
+                    else
+                        missingNormals[mat] = true;
+
+                    if (idx.texcoord_index >= 0) {
+                        v.uv = glm::make_vec2(&attrib.texcoords[size_t(idx.texcoord_index) * 2]);
+                        v.uv.y = 1 - v.uv.y;
+                    }
+
+                    mesh.indices.push_back(uint32_t(mesh.vertices.size()));
+                    mesh.vertices.push_back(v);
+                }
+
+                offset += count;
             }
 
-            int mat = shape.mesh.material_ids.empty() ? -1 : shape.mesh.material_ids[0];
-            generateNormalsAndTangents(mesh, missingNormals, true);
-            out.parts.push_back({shape.name,
-                                 {},
-                                 scene.addMesh(std::move(mesh)),
-                                 mat >= 0 ? mats.at(mat) : fallback});
+            for (auto& [mat, mesh] : groups) {
+                generateNormalsAndTangents(mesh, missingNormals[mat], true);
+                out.parts.push_back({shape.name,
+                                     {},
+                                     scene.addMesh(std::move(mesh)),
+                                     mat >= 0 ? mats.at(mat) : fallback});
+            }
         }
 
         if (out.parts.empty())
@@ -486,5 +512,6 @@ std::shared_ptr<const TextureData> AssetLoader::loadTexture(const std::filesyste
 
 void AssetLoader::clearCache() {
     impl_->models.clear();
+    impl_->textures.clear();
 }
 } // namespace rt
