@@ -1,14 +1,14 @@
 # third party
 
-versions are pinned in `CMakeLists.txt`
+pins are in `CMakeLists.txt`
 
-full license texts live in `third_party/licenses`
+license texts are in `third_party/licenses`
 
 GLFW zlib
 
 GLAD MIT
 
-GLM MIT
+GLM MIT and happy bunny
 
 stb MIT or public domain
 
@@ -22,4 +22,6 @@ Jolt MIT
 
 Dear ImGui MIT
 
-demo assets are original
+[LearnOpenGL](https://learnopengl.com/) by Joey de Vries is the rendering foundation
+
+demo assets are original and MIT licensed

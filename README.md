@@ -21,8 +21,8 @@ add_subdirectory(path/to/rtengine)
 target_link_libraries(my_app PRIVATE rtengine::renderer rtengine::importers rtengine::physics)
 ```
 
-Disable unneeded modules with `RTENGINE_BUILD_RENDERER`, `RTENGINE_BUILD_IMPORTERS`, `RTENGINE_BUILD_PHYSICS`, `RTENGINE_BUILD_DEMO`, and `RTENGINE_BUILD_TESTS`.
+Available targets are `rtengine::core`, `rtengine::renderer`, `rtengine::importers`, and `rtengine::physics`. Disable unneeded modules with `RTENGINE_BUILD_RENDERER`, `RTENGINE_BUILD_IMPORTERS`, `RTENGINE_BUILD_PHYSICS`, `RTENGINE_BUILD_DEMO`, and `RTENGINE_BUILD_TESTS`.
 
 ## Resources
 
-Pinned dependencies: GLFW, GLAD, GLM, stb_image, cgltf, tinyobjloader, Jolt, and Dear ImGui for the demo. License notices are in [THIRD_PARTY.md](THIRD_PARTY.md)
+The rendering approach is based on [LearnOpenGL](https://learnopengl.com/). Pinned dependencies: GLFW, GLAD, GLM, stb_image, cgltf, tinyobjloader, Jolt, and Dear ImGui for the demo. License notices and LearnOpenGL attribution are in [THIRD_PARTY.md](THIRD_PARTY.md)
