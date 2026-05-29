@@ -16,6 +16,15 @@
 #include <rtengine/physics.hpp>
 #include <rtengine/renderer.hpp>
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <psapi.h>
+#include <windows.h>
+
+#else
+#include <sys/resource.h>
+
+#endif
 using namespace rt;
 
 namespace {
@@ -199,6 +208,42 @@ struct Demo {
     }
 };
 
+uint64_t peakResidentBytes() {
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS counters{};
+
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters)))
+        return counters.PeakWorkingSetSize;
+    return 0;
+#else
+    rusage usage{};
+
+    if (getrusage(RUSAGE_SELF, &usage) != 0)
+        return 0;
+#ifdef __APPLE__
+    return uint64_t(usage.ru_maxrss);
+#else
+    return uint64_t(usage.ru_maxrss) * 1024;
+#endif
+#endif
+}
+
+std::string jsonString(std::string_view s) {
+    std::string out = "\"";
+
+    for (char c : s) {
+        if (c == '\\' || c == '"')
+            out += '\\';
+
+        if (static_cast<unsigned char>(c) < 32)
+            out += ' ';
+        else
+            out += c;
+    }
+
+    return out + '"';
+}
+
 double percentile(std::vector<double> v, double p) {
     if (v.empty())
         return 0;
@@ -256,6 +301,7 @@ int main(int argc, char** argv) {
             double fps = 0, averageFrameMilliseconds = 0, fpsElapsedSeconds = 0;
             unsigned fpsFrameCount = 0;
             std::vector<double> frameTimes, cpuTimes, gpuTimes;
+            std::array<std::vector<double>, 6> passes;
 
             while (!glfwWindowShouldClose(window) && (!o.frames || frame < o.frames + o.warmup)) {
                 auto start = std::chrono::steady_clock::now();
@@ -364,8 +410,15 @@ int main(int argc, char** argv) {
                 if (frame >= o.warmup) {
                     cpuTimes.push_back(stats.cpuMilliseconds);
 
-                    if (stats.gpuTimingsValid)
+                    if (stats.gpuTimingsValid) {
                         gpuTimes.push_back(stats.gpuMilliseconds);
+                        double values[] = {stats.shadowMilliseconds,   stats.geometryMilliseconds,
+                                           stats.rayMilliseconds,      stats.filterMilliseconds,
+                                           stats.lightingMilliseconds, stats.compositeMilliseconds};
+
+                        for (int i = 0; i < 6; ++i)
+                            passes[i].push_back(values[i]);
+                    }
                 }
 
                 glfwSwapBuffers(window);
@@ -405,18 +458,35 @@ int main(int argc, char** argv) {
                 auto stats = renderer.stats();
                 std::ostringstream report;
                 report << std::fixed << std::setprecision(3)
-                       << "{\n  \"width\": " << o.width << ", \"height\": " << o.height
+                       << "{\n  \"device\": " << jsonString(renderer.deviceDescription())
+                       << ",\n  \"peak_resident_bytes\": " << peakResidentBytes()
+                       << ",\n  \"gpu_timings_available\": "
+                       << (stats.gpuTimingsValid ? "true" : "false")
+                       << ",\n  \"width\": " << o.width << ", \"height\": " << o.height
                        << ", \"samples\": " << frameTimes.size()
                        << ",\n  \"triangles\": " << stats.triangles
                        << ", \"dynamic_bodies\": 32, \"lights\": " << stats.lights
                        << ",\n  \"frame_median_ms\": " << percentile(frameTimes, .5)
                        << ", \"frame_p95_ms\": " << percentile(frameTimes, .95)
                        << ",\n  \"cpu_median_ms\": " << percentile(cpuTimes, .5)
-                       << ", \"gpu_median_ms\": " << percentile(gpuTimes, .5)
+                       << ", \"gpu_median_ms\": "
+                       << (stats.gpuTimingsValid ? std::to_string(percentile(gpuTimes, .5))
+                                                 : "null")
+                       << ", \"gpu_p95_ms\": "
+                       << (stats.gpuTimingsValid ? std::to_string(percentile(gpuTimes, .95))
+                                                 : "null")
                        << ",\n  \"gpu_allocated_bytes\": " << stats.gpuAllocatedBytes
                        << ",\n  \"reflections\": " << (settings.reflections ? "true" : "false")
                        << ", \"gi\": " << (settings.globalIllumination ? "true" : "false")
-                       << "\n}\n";
+                       << ",\n  \"passes_median_ms\": {";
+                const char* names[] = {"shadows", "geometry", "rays",
+                                       "filter",  "lighting", "composite"};
+
+                for (int i = 0; i < 6; ++i)
+                    report << (i ? ", " : "") << '"' << names[i] << "\": "
+                           << (stats.gpuTimingsValid ? std::to_string(percentile(passes[i], .5))
+                                                     : "null");
+                report << "}\n}\n";
                 std::cout << report.str();
 
                 if (!o.report.empty()) {
